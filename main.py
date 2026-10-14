@@ -4,7 +4,7 @@ import pyautogui
 import pygetwindow as gw
 import time
 from gym import Env
-from gym.spaces import Box, Continuous
+from gym.spaces import Box, Discrete
 from matplotlib import pyplot as plt
 import cv2
 import numpy as np
@@ -28,3 +28,17 @@ gym.spaces.Discrete: A class for defining discrete action or observation spaces.
 matplotlib.pyplot: A library for creating plots and visualizations.
 cv2: The OpenCV library, used for image processing tasks.
 """
+
+class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
+    def __init__(self):
+        super().__init__() # just good practice. always call super constructor
+
+        HEIGHT = 128
+        WIDTH = 128
+
+        self.action_space = spaces.Discrete(3)
+        self.observation_space = Spaces.Box(
+            low=0,
+            high=255,
+            shape=(1, HEIGHT, WIDTH)
+        )
