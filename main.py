@@ -1,4 +1,4 @@
-from mss import mss
+import mss
 import pydirectinput
 import pyautogui
 import pygetwindow as gw
@@ -33,12 +33,75 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
     def __init__(self):
         super().__init__() # just good practice. always call super constructor
 
-        HEIGHT = 128
-        WIDTH = 128
+        self.IMAGE_HEIGHT = 128
+        self.IMAGE_WIDTH = 128
 
-        self.action_space = spaces.Discrete(3)
-        self.observation_space = Spaces.Box(
+        # Define our action and observation spaces
+        # We'll have 4 actions (left, right, up, no-op) 
+        # and a 128x128 downscaled grayscale iamge
+
+        self.action_space = Discrete(4)
+        self.observation_space = Box(
             low=0,
             high=255,
-            shape=(1, HEIGHT, WIDTH)
+            shape=(1, self.IMAGE_HEIGHT, self.IMAGE_WIDTH),
+            dtype = np.uint8
         )
+
+        self.game_location = {"left": 576, "top": 210, "width": 749, "height": 749}
+
+        # Two corners for PLAY AGAIN button:
+        # 759, 713
+        # 1050, 769
+        # Width: 292, Height: 57
+
+        # Create MSS instance and save it as a field so we don't re-create it
+        # every frame
+
+        self.done_location = {"left": 759, "top": 713, "width": 292, "height": 57}
+        self.cap = mss.MSS()
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+
+    def step(self, action):
+        # 0 - left
+        # 1 - right
+        # 2 - up
+        # 3 - no-op
+        pass
+
+    def get_observation(self):
+        screenshot = self.cap.grab(self.game_location)
+
+        # Convert to BGRA numpy array
+
+        img_data = np.frombuffer(screenshot.bgra, dtype=np.uint8)
+        img_data = img_data.reshape((screenshot.height, screenshot.width, 4))
+
+        # Grayscale it and downscale
+
+        grayscale_data = cv2.cvtColor(img_data, cv2.COLOR_BGRA2GRAY)
+        target_size = (self.IMAGE_WIDTH, self.IMAGE_HEIGHT)
+        resized_img = cv2.resize(grayscale_data, target_size, interpolation=cv2.INTER_AREA)
+
+        # Add a new dimension b/c SB3 (or rather PyTorch) 
+        # will expect (channels, height, width)
+
+        resized_img = resized_img[np.newaxis, :, :]
+
+        return resized_img
+
+    def get_done(self):
+        done_img = self.cap.grab(self.done_location)
+        return done_img
+
+    def close(self):
+        super().close()
+        self.cap.close()
+
+env = GoogleAtariBreakout()
+img = env.get_done()
+img = np.array(img).reshape((img.height, img.width, 4))
+img_bgr = img[:, :, :3]
+cv2.imwrite("done_img_test.png", img_bgr)
