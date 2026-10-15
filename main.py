@@ -3,8 +3,8 @@ import pydirectinput
 import pyautogui
 import pygetwindow as gw
 import time
-from gym import Env
-from gym.spaces import Box, Discrete
+from gymnasium import Env
+from gymnasium.spaces import Box, Discrete
 from matplotlib import pyplot as plt
 import cv2
 import numpy as np
