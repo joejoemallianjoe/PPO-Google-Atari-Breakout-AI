@@ -60,6 +60,9 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         self.done_location = {"left": 759, "top": 713, "width": 292, "height": 57}
         self.cap = mss.MSS()
+        self.done_image = cv2.imread("done_img.png", cv2.IMREAD_GRAYSCALE)
+
+        # cv2.imread will do (WIDTH, HEIGHT), excluding channels b/c grayscale
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -93,15 +96,27 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         return resized_img
 
     def get_done(self):
-        done_img = self.cap.grab(self.done_location)
-        return done_img
+        target_region_img = self.cap.grab(self.done_location)
+        region_data = np.frombuffer(target_region_img.bgra, dtype=np.uint8)
+        region_data = region_data.reshape((target_region_img.height, target_region_img.width, 4))
+        grayscale_data = cv2.cvtColor(region_data, cv2.COLOR_BGRA2GRAY)
+
+        # Use OpenCV template mattching to detect if it's there or not (overkill but i'm lazy)
+        # We don't care about the min value or the max or min locations
+
+        result = cv2.matchTemplate(grayscale_data, self.done_image, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _, = cv2.minMaxLoc(result)
+
+        # This represents 0.8 or more correlation
+
+        return max_val > 0.8
 
     def close(self):
         super().close()
         self.cap.close()
 
 env = GoogleAtariBreakout()
-img = env.get_done()
-img = np.array(img).reshape((img.height, img.width, 4))
-img_bgr = img[:, :, :3]
-cv2.imwrite("done_img_test.png", img_bgr)
+img = print(env.get_done())
+#img = np.array(img).reshape((img.height, img.width, 4))
+#img_bgr = img[:, :, :3]
+#cv2.imwrite("done_img_test.png", img_bgr)
