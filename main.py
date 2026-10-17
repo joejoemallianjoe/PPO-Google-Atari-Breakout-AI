@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 import cv2
 import numpy as np
 from playwright.sync_api import sync_playwright
+import asyncio
 import re
 
 """
@@ -26,7 +27,7 @@ gym.spaces: Modules for defining action and observation spaces in the reinforcem
 gym.spaces.Box: A class for defining continuous action or observation spaces.
                 (think like an n-dimensional continuous "vector"
                  e.g., for pixel values in an image).
-gym.spaces.Discrete: A class for defining discrete action or observation spaces.
+gym.spaces.Discrete: A class for defining discrete action and observation spaces.
 matplotlib.pyplot: A library for creating plots and visualizations.
 cv2: The OpenCV library, used for image processing tasks.
 playwright: A Python library for browser automation. It allows me to interact
@@ -35,9 +36,28 @@ playwright: A Python library for browser automation. It allows me to interact
 """
 
 class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
+    
     def __init__(self, page):
         super().__init__() # just good practice. always call super constructor
 
+        self.first_start = True
+
+        self.IMAGE_HEIGHT = 128
+        self.IMAGE_WIDTH = 128
+
+        # Define our action and observation spaces
+        # We'll have 4 actions (left, right, up, no-op) 
+        # and a 128x128 downscaled grayscale iamge
+
+        self.action_space = Discrete(4)
+        self.observation_space = Box(
+            low=0,
+            high=255,
+            shape=(1, self.IMAGE_HEIGHT, self.IMAGE_WIDTH),
+            dtype = np.uint8
+        )
+
+        self.cap = mss.MSS()
         self.page = page
 
         # We are going to manually intercept every JS script that's downloaded
@@ -45,6 +65,8 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # intercept it and overwrite part of its code to expose its
         # local variables so we can actually read the score and
         # the game over flag
+        # I had AI help me with this because there's no way I know how to
+        # reverse engineer stuff sorry I'm not cracked at CS
         def inject_memory_leak(route):
             if "m=syjv" not in route.request.url:
                 route.continue_()
@@ -53,7 +75,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             response = route.fetch()
             original_text = response.text()
             target_signature = ",IXE=function(a,b){"
-            
+
             if target_signature in original_text:
                 # REMOVED 'debugger;' so the game runs at full speed automatically!
                 print("Injected successfully!")
@@ -67,19 +89,24 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         self.page.route("**/xjs/_/js/**", inject_memory_leak)
 
-
         # 2. Now run your normal flow
         self.page.goto("https://www.google.com/search?q=block+breaker")
         self.page.get_by_role("button", name="Daily Challenge").click()
 
         # Finds the game's iframe, then waits for it to be visible
+        # Aight so ima be honest this isn't the most elegant solution but I think it works lmao
         game_frame_locator = self.page.frame_locator('iframe[jsname="V42h1d"]')
-        mute_button_locator = game_frame_locator.get_by_role("button", name="Mute")
         canvas_locator = game_frame_locator.locator("canvas")
+        mute_button_locator = game_frame_locator.get_by_role("button", name="Mute")
+        progress_bar = game_frame_locator.locator('div[aria-label="Loading..."]')
+
         mute_button_locator.wait_for(state="visible", timeout=15000)
-        
+        progress_bar.wait_for(state="hidden", timeout=15000)
+
+        time.sleep(2)
+
         print("Game loaded successfully!")
-        
+
         # Ok this JS code is stuff I learned myself and WHAT A PAIN IN THE AHH
         # getting the exact pixel is a pain in the AHH too
 
@@ -105,11 +132,9 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         canvas_viewport_coordinates = canvas_locator.bounding_box()
 
-        time.sleep(2)
-
         # It's not perfect, but it works. it's like off by +-2 pixels on average, which makes
         # no difference for a CNN.
-        
+
         mss_region = self.page.evaluate(
             """
             // Define an anonymous function
@@ -123,7 +148,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
                 // Calculate the device pixel ratio (e.g., 1.0 = 100%, 1.25 = 125%, stuff scale)
                 const dpr = window.devicePixelRatio || 1;
-    
+
                 // Now get the actual screen coordinates
                 // We add window.screenX and window.screenY in case the window is dragged
                 // around and not in the top-left corner
@@ -135,8 +160,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
                 const screenX = Math.floor(window.screenX + borderThickness + canvas_viewport_coords.x);
                 const screenY = Math.floor(window.screenY + tabHeight + canvas_viewport_coords.y);
 
-                // If top-left corner is at some super precise position like 572.2, 370.5,
-                // and width is 750 with a height of 750, what's effectively gonna happen
+                // If top-left corner is at some super precise position like 572.2, 370.5, and width is 750 with a height of 750, what's effectively gonna happen
                 // is that we get some decimal value --> it gets rounded
                 const effectiveWidth = Math.round(canvas_viewport_coords.width);
                 const effectiveHeight = Math.round(canvas_viewport_coords.height);
@@ -152,41 +176,24 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             canvas_viewport_coordinates
         )
 
-        print("Grabbed monitor-specific coordinates of game window")
-
-        self.IMAGE_HEIGHT = 128
-        self.IMAGE_WIDTH = 128
-
-        # Define our action and observation spaces
-        # We'll have 4 actions (left, right, up, no-op) 
-        # and a 128x128 downscaled grayscale iamge
-
-        self.action_space = Discrete(4)
-        self.observation_space = Box(
-            low=0,
-            high=255,
-            shape=(1, self.IMAGE_HEIGHT, self.IMAGE_WIDTH),
-            dtype = np.uint8
-        )
-
         self.game_location = mss_region
+        self.old_score = 0
+        self.game_iframe = game_frame_locator
 
-        # Two corners for PLAY AGAIN button:
-        # 759, 713
-        # 1050, 769
-        # Width: 292, Height: 57
-
-        # Create MSS instance and save it as a field so we don't re-create it
-        # every frame
-
-        self.done_location = {"left": 759, "top": 713, "width": 292, "height": 57}
-        self.cap = mss.MSS()
-        self.done_image = cv2.imread("done_img.png", cv2.IMREAD_GRAYSCALE)
-
-        # cv2.imread will do (WIDTH, HEIGHT), excluding channels b/c grayscale
-
+        print("Grabbed monitor-specific coordinates of game window")
+    
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.old_score = 0
+
+        if self.first_start:
+            self.page.keyboard.press("ArrowUp")
+            self.first_start = False
+        else:
+            self.game_iframe.get_by_text("Play again", exact=True).click()
+            self.page.keyboard.press("ArrowUp")
+
+        return self.get_observation(), {}
 
     def step(self, action):
         # 0 - left
@@ -198,32 +205,45 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # to see for us)
 
         action_map = {
-            0:  "left",
-            1:  "right",
-            2:  "up",
+            0:  "ArrowLeft",
+            1:  "ArrowRight",
+            2:  "ArrowUp",
             3:  "no-op"
         }
 
         if action != 3:
-            pydirectinput.press(action_map[action])
+            # Key up everything first
+            for a in action_map.values():
+                if a != "no-op":
+                    self.page.keyboard.up(a)
 
-        observation = self.get_observation()
-        done = self.get_done()
+            self.page.keyboard.down(action_map[action])
 
-        pass
+        observation = self.get_observation() 
+        done, score = self.get_score_and_done()
 
-    def get_rl_metrics(self):
+        if self.old_score != score:
+            reward = (score - self.old_score) / 1000
+            self.old_score = score
+        elif not done:
+            reward = 0
+        else:
+            reward = -1
+
+        return observation, reward, done, False, {}
+
+    def get_score_and_done(self):
         # Fetch the real-time variables from memory at lightning speed
         metrics = self.page.evaluate("""() => {
             const game = window.top.__stolen_game_state;
             if (!game) return { score: 0, done: false };
-            
+
             return {
                 score: game.Ji,    // Perfect reward signal
                 done: game.Cj      // True/False game-over state flag
             };
         }""")
-        return metrics
+        return metrics["done"], metrics["score"]
 
     def get_observation(self):
         screenshot = self.cap.grab(self.game_location)
@@ -250,22 +270,6 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         return resized_img
 
-    def get_done(self):
-        target_region_img = self.cap.grab(self.done_location)
-        region_data = np.frombuffer(target_region_img.bgra, dtype=np.uint8)
-        region_data = region_data.reshape((target_region_img.height, target_region_img.width, 4))
-        grayscale_data = cv2.cvtColor(region_data, cv2.COLOR_BGRA2GRAY)
-
-        # Use OpenCV template mattching to detect if it's there or not (overkill but i'm lazy)
-        # We don't care about the min value or the max or min locations
-
-        result = cv2.matchTemplate(grayscale_data, self.done_image, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _, = cv2.minMaxLoc(result)
-
-        # This represents 0.8 or more correlation
-
-        return max_val > 0.8
-
     def close(self):
         super().close()
         self.cap.close()
@@ -281,47 +285,60 @@ and just directly listen to whatever function is called when the game is over
 in the JS
 """
 
-with sync_playwright() as p:
-    # Launch the browser. headless=False means we actually show the browser being launched
-    # Start-maximized maximizes the window
-    # disable blink features makes it look less like it's a bot so chrome doesn't give us
-    # the annoying "Are you a human?" captcha pop-up
-    browser = p.chromium.launch(
-        headless=False,
-        args=[
-            "--auto-open-devtools-for-tabs",
-            "--start-maximized",
-            "--disable-blink-features=AutomationControlled",
-        ],
-    )
+def main():
+    with sync_playwright() as p:
+        # Launch the browser. headless=False means we actually show the browser being launched
+        # Start-maximized maximizes the window
+        # disable blink features makes it look less like a bot so chrome doesn't give us
+        # the annoying "Are you a human?" captcha pop-up
+        browser = p.chromium.launch(
+            headless=False,
+            args=[
+                "--start-maximized",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
 
-    # This opens the new window in sort of incognito mode. no viewport 
-    # = true was some fix that was needed because it was ignoring start-maximized by making the
-    # page's viewport not take up the entire window
-    # user_agent is just some other stuff to mimic being a human
+        # This opens the new window in sort of incognito mode. no viewport 
+        # = true was some fix that was needed because it was ignoring start-maximized by making the
+        # page's viewport not take up the entire window
+        # user_agent is just some other stuff to mimic being a human
 
-    context = browser.new_context(
-        bypass_csp=True,
-        no_viewport=True,
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-            " like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-    )
+        context = browser.new_context(
+            bypass_csp=True,
+            no_viewport=True,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+                " like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
 
-    # This opens a new page
-    page = context.new_page()
-    
-    env = GoogleAtariBreakout(page)
-    env.get_observation()
+        # This opens a new page
+        page = context.new_page()
 
-    while True:
-        print(env.get_rl_metrics())
-        time.sleep(1)
-    # img = print(env.get_done())
-    # img = np.array(img).reshape((img.height, img.width, 4))
-    # img_bgr = img[:, :, :3]
-    # cv2.imwrite("done_img_test.png", img_bgr)
+        env = GoogleAtariBreakout(page)
+        
+        while True:
+            init_observation, info = env.reset()
 
-    time.sleep(500)
-    browser.close()
+            timestep = 0
+            done = False
+
+            while not done:
+                observation, reward, done, truncated, info = env.step(env.action_space.sample())
+                print(f"Timestep: {timestep} |", reward, done, truncated, info)
+                time.sleep(4 / 60)
+                timestep += 1
+
+        #while True:
+        #    time.sleep(1)
+        #    print(env.get_score_and_done())
+        # img = print(env.get_done())
+        # img = np.array(img).reshape((img.height, img.width, 4))
+        # img_bgr = img[:, :, :3]
+        # cv2.imwrite("done_img_test.png", img_bgr)
+
+        time.sleep(500)
+        browser.close()
+
+main()
