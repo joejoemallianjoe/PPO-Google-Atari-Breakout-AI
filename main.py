@@ -13,6 +13,9 @@ import asyncio
 import re
 import os
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3 import PPO
+from stable_baselines3.common.atari_wrappers import MaxAndSkipEnv # for frame skipping
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack # for frame stacking
 
 """
 Import explanation (for me to remember):
@@ -222,7 +225,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             self.page.keyboard.press("ArrowUp")
             self.first_start = False
         else:
-            self.game_iframe.get_by_text("Play again", exact=True).click()
+            self.game_iframe.get_by_text("Play again", exact=True).click(timeout=120_000)
             self.page.keyboard.press("ArrowUp")
 
         return self.get_observation(), {}
@@ -243,12 +246,12 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             3:  "no-op"
         }
 
+        for a in action_map.values():
+            if a != "no-op":
+                self.page.keyboard.up(a)
+
         if action != 3:
             # Key up everything first
-            for a in action_map.values():
-                if a != "no-op":
-                    self.page.keyboard.up(a)
-
             self.page.keyboard.down(action_map[action])
 
         observation = self.get_observation() 
@@ -287,7 +290,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         # (For debugging purposes)
 
-        cv2.imwrite("what_ai_sees_test.png", img_data)
+        #cv2.imwrite("what_ai_sees_test.png", img_data)
 
         # Grayscale it and downscale
 
@@ -307,6 +310,24 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         self.cap.close()
         self.browser.close()
 
+# Responsible for saving the best model
+class TrainAndLoggingCallback(BaseCallback):
+    def __init__(self, check_freq, save_path, verbose=1):
+        super(TrainAndLoggingCallback, self).__init__(verbose)
+        self.check_freq = check_freq
+        self.save_path = save_path
+
+    def _init_callback(self) -> None:
+        if self.save_path is not None:
+            os.makedirs(self.save_path, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.check_freq == 0:
+            model_path = os.path.join(self.save_path, "model_{}".format(self.n_calls))
+            self.model.save(model_path)
+
+        return True
+
 """
 I apologize for this sacrilege but trying to find the game's internal JS was
 and trying to get it to launch properly genuinely pmo so much that I used Gemini to
@@ -320,7 +341,75 @@ in the JS
 
 def main():
     with sync_playwright() as p:
-        env = GoogleAtariBreakout(p)
+        base_env = GoogleAtariBreakout(p)
+        frame_skip = 4
+
+        env = DummyVecEnv([lambda: base_env])
+        env = VecFrameStack(env, n_stack=frame_skip, channels_order="first")
+
+        # Saving logic
+        CHECKPOINT_DIR = "./train/"
+        LOG_DIR = "./logs/"
+        callback = TrainAndLoggingCallback(check_freq=300, save_path=CHECKPOINT_DIR)
+
+        # Training or deployment?
+
+        train = True
+        load_previous_model_for_training = False
+
+        learning_steps = 128
+        num_training_cycles = 782
+
+        if train:
+            if load_previous_model_for_training:
+                model_name = "best_model_2400"
+                model = PPO.load(os.path.join(CHECKPOINT_DIR, model_name),
+                                env=env)
+                learning_steps = model.n_steps
+            else:
+                model = PPO(
+                    policy="CnnPolicy",
+                    env=env,
+                    verbose=1,
+                    learning_rate=3e-4,
+                    n_steps=learning_steps,
+                    batch_size=64,
+                    tensorboard_log=LOG_DIR
+                )
+
+            for cycle in range(num_training_cycles):
+                # Because my PC is slow, when PPO trains, it genuinely takes like a good minute
+                # The game changes a lot within that minute, so we're gonna need some major
+                # resyncing logic.
+                model.learn(total_timesteps=learning_steps, reset_num_timesteps=False, callback=callback)
+
+                obs = env.reset()
+
+                # Fix PPO's internal transition logic at the boundary so it doesn't think
+                # its action illogically led to its demise
+                model._last_obs = obs
+                model._last_episode_starts = np.ones(
+                    env.num_envs, dtype=bool
+                )
+        else:
+            model_name = "Enter model name here. ex: best_model_80000"
+            model = PPO.load(os.path.join(CHECKPOINT_DIR, model_name))
+
+            episode = 0
+
+            while True:
+                obs = env.reset()
+                done = False
+                total_reward = 0
+
+                while not done:
+                    action, _ = model.predict(obs)
+                    obs, reward, done, info = env.step(action)
+                    total_reward += reward
+                
+                print(f"Total Reward for Episode {episode}: {total_reward}")
+
+                episode += 1
 
         """
         while True:
