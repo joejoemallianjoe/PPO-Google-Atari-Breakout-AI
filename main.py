@@ -8,6 +8,7 @@ from gymnasium.spaces import Box, Discrete
 from matplotlib import pyplot as plt
 import cv2
 import numpy as np
+from playwright.sync_api import sync_playwright
 
 """
 Import explanation (for me to remember):
@@ -27,11 +28,132 @@ gym.spaces.Box: A class for defining continuous action or observation spaces.
 gym.spaces.Discrete: A class for defining discrete action or observation spaces.
 matplotlib.pyplot: A library for creating plots and visualizations.
 cv2: The OpenCV library, used for image processing tasks.
+playwright: A Python library for browser automation. It allows me to interact
+            with the JS code so I can get the score and game over stuff
+            really quickly without having to use some OCR or CV solution.
 """
 
 class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
-    def __init__(self):
+    def __init__(self, page):
         super().__init__() # just good practice. always call super constructor
+
+        self.page = page
+        # 1. Define a local function that will modify the JavaScript file over the network
+        def modify_google_script(route):
+            # Fetch the original JavaScript file data from Google's servers
+            response = route.fetch()
+            original_text = response.text()
+
+            # Look for the exact initialization signature you found
+            target_string = "loaded_h_0(function(_){"
+            
+            # Check if this specific network file contains our game loader code
+            if target_string in original_text:
+                print("🎯 NETWORK EXPLOIT MATCH: Located the game payload file!")
+                
+                # Inject our leak statement right after the function begins.
+                # This copies the private local closure variable (_) onto the window 
+                # the exact millisecond the script runs natively!
+                injected_text = original_text.replace(
+                    target_string,
+                    target_string + "window.__stolen_payload = _; console.log('💎 EXPLOIT SUCCESS: Game variables leaked globally.');"
+                )
+                
+                # Fulfill the network request using our modified text data instead of Google's real code
+                route.fulfill(response=response, body=injected_text)
+            else:
+                # If it's a different script file, let it pass through unchanged
+                route.continue_()
+
+        # 2. Register the network interceptor ROUTE before navigating to the search page
+        # This scans every single JavaScript file coming from Google's servers
+        self.page.route("**/xjs/_/js/**", modify_google_script)
+
+        # 2. Now run your normal flow
+        self.page.goto("https://www.google.com/search?q=block+breaker")
+        self.page.get_by_role("button", name="Daily Challenge").click()
+
+        # Finds the game's iframe, then waits for it to be visible
+        game_frame_locator = self.page.frame_locator('iframe[jsname="V42h1d"]')
+        mute_button_locator = game_frame_locator.get_by_role("button", name="Mute")
+        canvas_locator = game_frame_locator.locator("canvas")
+        mute_button_locator.wait_for(state="visible", timeout=15000)
+        
+        print("Game loaded successfully!")
+        
+        # Ok this JS code is stuff I learned myself and WHAT A PAIN IN THE AHH
+        # getting the exact pixel is a pain in the AHH too
+
+        # Playwright is gonna deal with all the iframe BS for us
+        # (because an iframe is like another webpage so getBoundingClientRect() is relative to)
+
+        """
+        A long, long time ago, CSS was being made... but its creators realized that one
+        pixel on your laptop screen wasn't the same physical size in say inches as a
+        pixel on your phone... so they created CSS PIXELS! AND NOW THAT'S WHY WE GET
+        A CONFUSING WAY TO GET THE ABSOLUTE PIXEL POSITION!!
+
+        Physical pixel: An actual pixel on your screen. Depends on how densely packed
+                        pixels are. Think "PPI" -- pixels per inch.
+        CSS pixel:      An angular measurement, defined as one pixel on a standard
+                        96 PPI monitor from an arm's length (~28 inches)
+
+        Software has no way of knowing how big one pixel is on your display, so a
+        scaling factor needs to be specified. This is called DPR.
+
+        Physical pixel = CSS pixel * DPR 
+        """
+
+        canvas_viewport_coordinates = canvas_locator.bounding_box()
+
+        time.sleep(2)
+
+        # It's not perfect, but it works. it's like off by +-2 pixels on average, which makes
+        # no difference for a CNN.
+        
+        mss_region = self.page.evaluate(
+            """
+            // Define an anonymous function
+            // We can pass python values into the function by creating parameters
+            (canvas_viewport_coords) => {
+                // Use the difference between the browser's width and the webpage's width
+                // as a reliable way to get border thickness
+                // Divide by two because there are two borders on the side
+                const borderThickness = (window.outerWidth - window.innerWidth) / 2;
+                const tabHeight = window.outerHeight - borderThickness - window.innerHeight;
+
+                // Calculate the device pixel ratio (e.g., 1.0 = 100%, 1.25 = 125%, stuff scale)
+                const dpr = window.devicePixelRatio || 1;
+    
+                // Now get the actual screen coordinates
+                // We add window.screenX and window.screenY in case the window is dragged
+                // around and not in the top-left corner
+
+                // screenX and screenY are gonna be super precise (sub-pixel positions),
+                // so we will need to round down on the position
+                // and then round up on the width and height to ensure that the entire window
+                // actually gets captured
+                const screenX = Math.floor(window.screenX + borderThickness + canvas_viewport_coords.x);
+                const screenY = Math.floor(window.screenY + tabHeight + canvas_viewport_coords.y);
+
+                // If top-left corner is at some super precise position like 572.2, 370.5,
+                // and width is 750 with a height of 750, what's effectively gonna happen
+                // is that we get some decimal value --> it gets rounded
+                const effectiveWidth = Math.round(canvas_viewport_coords.width);
+                const effectiveHeight = Math.round(canvas_viewport_coords.height);
+
+                return {
+                    left: Math.round(screenX * dpr),
+                    top: Math.round(screenY * dpr),
+                    width: Math.round(effectiveWidth * dpr),
+                    height: Math.round(effectiveHeight * dpr)
+                };
+            }
+            """,
+            canvas_viewport_coordinates
+        )
+
+        print("Grabbed monitor-specific coordinates of game window")
 
         self.IMAGE_HEIGHT = 128
         self.IMAGE_WIDTH = 128
@@ -48,7 +170,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             dtype = np.uint8
         )
 
-        self.game_location = {"left": 576, "top": 210, "width": 749, "height": 749}
+        self.game_location = mss_region
 
         # Two corners for PLAY AGAIN button:
         # 759, 713
@@ -72,6 +194,23 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # 1 - right
         # 2 - up
         # 3 - no-op
+
+        # Have a dictionary map indices to actions (even if it's sort of redundant, it's nice
+        # to see for us)
+
+        action_map = {
+            0:  "left",
+            1:  "right",
+            2:  "up",
+            3:  "no-op"
+        }
+
+        if action != 3:
+            pydirectinput.press(action_map[action])
+
+        observation = self.get_observation()
+        done = self.get_done()
+
         pass
 
     def get_observation(self):
@@ -81,6 +220,10 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         img_data = np.frombuffer(screenshot.bgra, dtype=np.uint8)
         img_data = img_data.reshape((screenshot.height, screenshot.width, 4))
+
+        # (For debugging purposes)
+
+        cv2.imwrite("what_ai_sees_test.png", img_data)
 
         # Grayscale it and downscale
 
@@ -115,8 +258,53 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         super().close()
         self.cap.close()
 
-env = GoogleAtariBreakout()
-img = print(env.get_done())
-#img = np.array(img).reshape((img.height, img.width, 4))
-#img_bgr = img[:, :, :3]
-#cv2.imwrite("done_img_test.png", img_bgr)
+"""
+I apologize for this sacrilege but trying to find the game's internal JS was
+and trying to get it to launch properly genuinely pmo so much that I used Gemini to
+generate some of the code below here. I needed the game's internal JS
+because it was either that or a super slow OCR algorithm to get the score
+in order to reward the agent. I figured if I was gonna get the game's internal JS
+why not just scrap the done mechanic that uses OpenCV template matching
+and just directly listen to whatever function is called when the game is over
+in the JS
+"""
+
+with sync_playwright() as p:
+    # Launch the browser. headless=False means we actually show the browser being launched
+    # Start-maximized maximizes the window
+    # disable blink features makes it look less like it's a bot so chrome doesn't give us
+    # the annoying "Are you a human?" captcha pop-up
+    browser = p.chromium.launch(
+        headless=False,
+        args=[
+            "--start-maximized",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+
+    # This opens the new window in sort of incognito mode. no viewport 
+    # = true was some fix that was needed because it was ignoring start-maximized by making the
+    # page's viewport not take up the entire window
+    # user_agent is just some other stuff to mimic being a human
+
+    context = browser.new_context(
+        bypass_csp=True,
+        no_viewport=True,
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+            " like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
+
+    # This opens a new page
+    page = context.new_page()
+    
+    env = GoogleAtariBreakout(page)
+    env.get_observation()
+    # img = print(env.get_done())
+    # img = np.array(img).reshape((img.height, img.width, 4))
+    # img_bgr = img[:, :, :3]
+    # cv2.imwrite("done_img_test.png", img_bgr)
+
+    time.sleep(500)
+    browser.close()
