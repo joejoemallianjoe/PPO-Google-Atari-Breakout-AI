@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 import cv2
 import numpy as np
 from playwright.sync_api import sync_playwright
+import re
 
 """
 Import explanation (for me to remember):
@@ -38,36 +39,34 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         super().__init__() # just good practice. always call super constructor
 
         self.page = page
-        # 1. Define a local function that will modify the JavaScript file over the network
-        def modify_google_script(route):
-            # Fetch the original JavaScript file data from Google's servers
+
+        # We are going to manually intercept every JS script that's downloaded
+        # Then if we find the target one containing the game's code, we
+        # intercept it and overwrite part of its code to expose its
+        # local variables so we can actually read the score and
+        # the game over flag
+        def inject_memory_leak(route):
+            if "m=syjv" not in route.request.url:
+                route.continue_()
+                return
+
             response = route.fetch()
             original_text = response.text()
-
-            # Look for the exact initialization signature you found
-            target_string = "loaded_h_0(function(_){"
+            target_signature = ",IXE=function(a,b){"
             
-            # Check if this specific network file contains our game loader code
-            if target_string in original_text:
-                print("🎯 NETWORK EXPLOIT MATCH: Located the game payload file!")
-                
-                # Inject our leak statement right after the function begins.
-                # This copies the private local closure variable (_) onto the window 
-                # the exact millisecond the script runs natively!
+            if target_signature in original_text:
+                # REMOVED 'debugger;' so the game runs at full speed automatically!
+                print("Injected successfully!")
                 injected_text = original_text.replace(
-                    target_string,
-                    target_string + "window.__stolen_payload = _; console.log('💎 EXPLOIT SUCCESS: Game variables leaked globally.');"
+                    target_signature,
+                    target_signature + "window.top.__stolen_game_state=a;"
                 )
-                
-                # Fulfill the network request using our modified text data instead of Google's real code
                 route.fulfill(response=response, body=injected_text)
             else:
-                # If it's a different script file, let it pass through unchanged
                 route.continue_()
 
-        # 2. Register the network interceptor ROUTE before navigating to the search page
-        # This scans every single JavaScript file coming from Google's servers
-        self.page.route("**/xjs/_/js/**", modify_google_script)
+        self.page.route("**/xjs/_/js/**", inject_memory_leak)
+
 
         # 2. Now run your normal flow
         self.page.goto("https://www.google.com/search?q=block+breaker")
@@ -213,6 +212,19 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         pass
 
+    def get_rl_metrics(self):
+        # Fetch the real-time variables from memory at lightning speed
+        metrics = self.page.evaluate("""() => {
+            const game = window.top.__stolen_game_state;
+            if (!game) return { score: 0, done: false };
+            
+            return {
+                score: game.Ji,    // Perfect reward signal
+                done: game.Cj      // True/False game-over state flag
+            };
+        }""")
+        return metrics
+
     def get_observation(self):
         screenshot = self.cap.grab(self.game_location)
 
@@ -277,6 +289,7 @@ with sync_playwright() as p:
     browser = p.chromium.launch(
         headless=False,
         args=[
+            "--auto-open-devtools-for-tabs",
             "--start-maximized",
             "--disable-blink-features=AutomationControlled",
         ],
@@ -301,6 +314,10 @@ with sync_playwright() as p:
     
     env = GoogleAtariBreakout(page)
     env.get_observation()
+
+    while True:
+        print(env.get_rl_metrics())
+        time.sleep(1)
     # img = print(env.get_done())
     # img = np.array(img).reshape((img.height, img.width, 4))
     # img_bgr = img[:, :, :3]
