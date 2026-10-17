@@ -11,6 +11,8 @@ import numpy as np
 from playwright.sync_api import sync_playwright
 import asyncio
 import re
+import os
+from stable_baselines3.common.callbacks import BaseCallback
 
 """
 Import explanation (for me to remember):
@@ -37,7 +39,7 @@ playwright: A Python library for browser automation. It allows me to interact
 
 class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
     
-    def __init__(self, page):
+    def __init__(self, p):
         super().__init__() # just good practice. always call super constructor
 
         self.first_start = True
@@ -58,7 +60,36 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         )
 
         self.cap = mss.MSS()
-        self.page = page
+
+        # Launch the browser. headless=False means we actually show the browser being launched
+        # Start-maximized maximizes the window
+        # disable blink features makes it look less like a bot so chrome doesn't give us
+        # the annoying "Are you a human?" captcha pop-up
+        browser = p.chromium.launch(
+            headless=False,
+            args=[
+                "--start-maximized",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+
+        # This opens the new window in sort of incognito mode. no viewport 
+        # = true was some fix that was needed because it was ignoring start-maximized by making the
+        # page's viewport not take up the entire window
+        # user_agent is just some other stuff to mimic being a human
+
+        context = browser.new_context(
+            bypass_csp=True,
+            no_viewport=True,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+                " like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+
+        # This opens a new page
+        self.page = context.new_page()
+        self.browser = browser
 
         # We are going to manually intercept every JS script that's downloaded
         # Then if we find the target one containing the game's code, we
@@ -67,6 +98,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # the game over flag
         # I had AI help me with this because there's no way I know how to
         # reverse engineer stuff sorry I'm not cracked at CS
+
         def inject_memory_leak(route):
             if "m=syjv" not in route.request.url:
                 route.continue_()
@@ -273,6 +305,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
     def close(self):
         super().close()
         self.cap.close()
+        self.browser.close()
 
 """
 I apologize for this sacrilege but trying to find the game's internal JS was
@@ -287,37 +320,9 @@ in the JS
 
 def main():
     with sync_playwright() as p:
-        # Launch the browser. headless=False means we actually show the browser being launched
-        # Start-maximized maximizes the window
-        # disable blink features makes it look less like a bot so chrome doesn't give us
-        # the annoying "Are you a human?" captcha pop-up
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--start-maximized",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+        env = GoogleAtariBreakout(p)
 
-        # This opens the new window in sort of incognito mode. no viewport 
-        # = true was some fix that was needed because it was ignoring start-maximized by making the
-        # page's viewport not take up the entire window
-        # user_agent is just some other stuff to mimic being a human
-
-        context = browser.new_context(
-            bypass_csp=True,
-            no_viewport=True,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-                " like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-
-        # This opens a new page
-        page = context.new_page()
-
-        env = GoogleAtariBreakout(page)
-        
+        """
         while True:
             init_observation, info = env.reset()
 
@@ -329,6 +334,7 @@ def main():
                 print(f"Timestep: {timestep} |", reward, done, truncated, info)
                 time.sleep(4 / 60)
                 timestep += 1
+        """
 
         #while True:
         #    time.sleep(1)
@@ -337,8 +343,5 @@ def main():
         # img = np.array(img).reshape((img.height, img.width, 4))
         # img_bgr = img[:, :, :3]
         # cv2.imwrite("done_img_test.png", img_bgr)
-
-        time.sleep(500)
-        browser.close()
 
 main()
