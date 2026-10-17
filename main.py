@@ -310,7 +310,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         self.cap.close()
         self.browser.close()
 
-# Responsible for saving the best model
+# Responsible for saving the model
 class TrainAndLoggingCallback(BaseCallback):
     def __init__(self, check_freq, save_path, verbose=1):
         super(TrainAndLoggingCallback, self).__init__(verbose)
@@ -339,6 +339,10 @@ and just directly listen to whatever function is called when the game is over
 in the JS
 """
 
+"""
+IMPORTANT!! Disable f.lux when using
+"""
+
 def main():
     with sync_playwright() as p:
         base_env = GoogleAtariBreakout(p)
@@ -357,12 +361,13 @@ def main():
         train = True
         load_previous_model_for_training = False
 
-        learning_steps = 128
-        num_training_cycles = 782
+        learning_steps = 512
+        total_timesteps = 100000
+        num_training_cycles = int(total_timesteps / learning_steps)
 
         if train:
             if load_previous_model_for_training:
-                model_name = "best_model_2400"
+                model_name = "model_3300"
                 model = PPO.load(os.path.join(CHECKPOINT_DIR, model_name),
                                 env=env)
                 learning_steps = model.n_steps
@@ -383,14 +388,31 @@ def main():
                 # resyncing logic.
                 model.learn(total_timesteps=learning_steps, reset_num_timesteps=False, callback=callback)
 
-                obs = env.reset()
+                original_env = env.venv.envs[0]
+                done, _ = original_env.get_score_and_done()
+
+                if done:
+                    obs = env.reset()
+                else:
+                    # Continue with inference (no more training for the episode) 
+                    # if training finished mid-game
+                    obs, rewards, dones, infos = env.step([3])
+
+                    while not dones[0]:
+                        action, _ = model.predict(obs)
+                        obs, rewards, dones, infos = env.step(action)
+
+                    #DummyVecEnv is gonna automatically restart the environment when
+                    # dones[0] is True
 
                 # Fix PPO's internal transition logic at the boundary so it doesn't think
                 # its action illogically led to its demise
+
                 model._last_obs = obs
                 model._last_episode_starts = np.ones(
                     env.num_envs, dtype=bool
                 )
+
         else:
             model_name = "Enter model name here. ex: best_model_80000"
             model = PPO.load(os.path.join(CHECKPOINT_DIR, model_name))
