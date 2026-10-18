@@ -239,7 +239,6 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
     def _on_game_event(self, source, event):
         if event["type"] == "score":
-            print(f"score update: {event["value"]}")
             self.latest_score = event["value"]
         elif event["type"] == "done":
             self.latest_done = event["value"]
