@@ -1,6 +1,4 @@
-import mss
-import pydirectinput
-import pyautogui
+import dxcam
 import pygetwindow as gw
 import time
 from gymnasium import Env
@@ -9,8 +7,6 @@ from matplotlib import pyplot as plt
 import cv2
 import numpy as np
 from playwright.sync_api import sync_playwright
-import asyncio
-import re
 import os
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3 import PPO
@@ -18,7 +14,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack # for fr
 
 """
 Import explanation (for me to remember):
-mss: Stands for "multi-screen shot". Library used for capturing screenshots of the screen.
+dxcam: DirectX screen capture windows-based Python library. MUCH faster than MSS
+       but only for windows (unfortunately)
 pydirectinput: A library that allows for simulating keyboard and mouse input. 
                It is used to send input commands to the game.
 pyautogui: A library for GUI automation, used for locating images on the screen and 
@@ -61,7 +58,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             dtype = np.uint8
         )
 
-        self.cap = mss.MSS()
+        self.cap = dxcam.create()
 
         # Launch the browser. headless=False means we actually show the browser being launched
         # Start-maximized maximizes the window
@@ -213,12 +210,14 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         self.game_location = mss_region
         self.old_score = 0
         self.game_iframe = game_frame_locator
+        self.held_key = None
 
         print("Grabbed monitor-specific coordinates of game window")
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.old_score = 0
+        self.held_key = None
 
         if self.first_start:
             self.page.keyboard.press("ArrowUp")
@@ -230,32 +229,40 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         return self.get_observation(), {}
 
     def step(self, action):
-        # 0 - left
-        # 1 - right
-        # 2 - up
-        # 3 - no-op
-
-        # Have a dictionary map indices to actions (even if it's sort of redundant, it's nice
-        # to see for us)
+        t0 = time.perf_counter()
 
         action_map = {
-            0:  "ArrowLeft",
-            1:  "ArrowRight",
-            2:  "ArrowUp",
-            3:  "no-op"
+            0: "ArrowLeft",
+            1: "ArrowRight",
+            2: "ArrowUp",
+            3: None
         }
 
-        for a in action_map.values():
-            if a != "no-op":
-                self.page.keyboard.up(a)
+        # Keyboard handling
+        new_key = action_map[action]
 
-        if action != 3:
-            # Key up everything first
-            self.page.keyboard.down(action_map[action])
+        if new_key != self.held_key:
+            if self.held_key:
+                self.page.keyboard.up(self.held_key)
 
-        observation = self.get_observation() 
+            if new_key is not None:
+                self.page.keyboard.down(new_key)
+
+            self.held_key = new_key
+
+        t1 = time.perf_counter()
+
+        # Capture and process observation
+        observation = self.get_observation()
+
+        t2 = time.perf_counter()
+
+        # Query game state
         done, score = self.get_score_and_done()
 
+        t3 = time.perf_counter()
+
+        # Calculate reward
         if self.old_score != score:
             reward = (score - self.old_score) / 1000
             self.old_score = score
@@ -263,6 +270,37 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             reward = 0
         else:
             reward = -1
+
+        t4 = time.perf_counter()
+
+        # Timing: keyboard, observation, JS query, reward, total step
+        if not hasattr(self, "_step_timing_count"):
+            self._step_timing_count = 0
+            self._step_timing_totals = np.zeros(5)
+
+        self._step_timing_totals += [
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t4 - t3,
+            t4 - t0
+        ]
+        self._step_timing_count += 1
+
+        if self._step_timing_count >= 100:
+            avg = self._step_timing_totals / self._step_timing_count
+
+            print(
+                f"Keyboard: {avg[0]*1000:.1f} ms | "
+                f"Observation: {avg[1]*1000:.1f} ms | "
+                f"JS query: {avg[2]*1000:.1f} ms | "
+                f"Reward: {avg[3]*1000:.2f} ms | "
+                f"Total step: {avg[4]*1000:.1f} ms | "
+                f"Env FPS: {1/avg[4]:.1f}"
+            )
+
+            self._step_timing_count = 0
+            self._step_timing_totals[:] = 0
 
         return observation, reward, done, False, {}
 
@@ -280,29 +318,26 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         return metrics["done"], metrics["score"]
 
     def get_observation(self):
-        screenshot = self.cap.grab(self.game_location)
+        screenshot = self.cap.grab(
+            region=(
+                self.game_location["left"],
+                self.game_location["top"],
+                self.game_location["left"] + self.game_location["width"],
+                self.game_location["top"] + self.game_location["height"]
+            ),
+            new_frame_only=False
+        )
 
-        # Convert to BGRA numpy array
+        grayscale_data = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
 
-        img_data = np.frombuffer(screenshot.bgra, dtype=np.uint8)
-        img_data = img_data.reshape((screenshot.height, screenshot.width, 4))
-
-        # (For debugging purposes)
-
-        #cv2.imwrite("what_ai_sees_test.png", img_data)
-
-        # Grayscale it and downscale
-
-        grayscale_data = cv2.cvtColor(img_data, cv2.COLOR_BGRA2GRAY)
         target_size = (self.IMAGE_WIDTH, self.IMAGE_HEIGHT)
-        resized_img = cv2.resize(grayscale_data, target_size, interpolation=cv2.INTER_AREA)
+        resized_img = cv2.resize(
+            grayscale_data,
+            target_size,
+            interpolation=cv2.INTER_AREA
+        )
 
-        # Add a new dimension b/c SB3 (or rather PyTorch) 
-        # will expect (channels, height, width)
-
-        resized_img = resized_img[np.newaxis, :, :]
-
-        return resized_img
+        return resized_img[np.newaxis, :, :]
 
     def close(self):
         super().close()
@@ -350,7 +385,7 @@ def main():
         # Because my computer is so slow, the overhead from taking an image and running it through
         # a CNN policy is slow enough that frame skipping should NOT be implemented
         # frame stacking however is encouraged
-        
+
         env = DummyVecEnv([lambda: base_env])
         env = VecFrameStack(env, n_stack=frame_stack, channels_order="first")
 
@@ -362,7 +397,7 @@ def main():
         # Training or deployment?
 
         train = True
-        load_previous_model_for_training = True
+        load_previous_model_for_training = False
 
         learning_steps = 512
         total_timesteps = 100000
