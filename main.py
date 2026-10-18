@@ -11,6 +11,7 @@ import os
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack # for frame stacking
+import re
 
 """
 Import explanation (for me to remember):
@@ -105,20 +106,38 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
             response = route.fetch()
             original_text = response.text()
-            target_signature = ",IXE=function(a,b){"
+            injected_text = original_text
 
-            if target_signature in original_text:
-                # REMOVED 'debugger;' so the game runs at full speed automatically!
-                print("Injected successfully!")
-                injected_text = original_text.replace(
-                    target_signature,
-                    target_signature + "window.top.__stolen_game_state=a;"
-                )
-                route.fulfill(response=response, body=injected_text)
-            else:
+            done_signature = "a.Cj=!0"
+            score_signature = ",IXE=function(a,b){"
+
+            if done_signature not in original_text and score_signature not in original_text:
                 route.continue_()
+                return
+
+            if done_signature in injected_text:
+                print("Injected done_signature successfully!")
+
+                injected_text = injected_text.replace(
+                    done_signature,
+                    done_signature + ',window.reportGameEvent({type: "done", value: a.Cj})'
+                )
+
+            if score_signature in injected_text:
+                print("Injected score_signature successfully!")
+
+                injected_text = injected_text.replace(
+                    score_signature,
+                    score_signature + 'window.reportGameEvent({type: "score", value: a.Ji + b});'
+                )
+
+            route.fulfill(response=response, body=injected_text)
 
         self.page.route("**/xjs/_/js/**", inject_memory_leak)
+        self.page.expose_binding(
+            "reportGameEvent",
+            self._on_game_event
+        )
 
         # 2. Now run your normal flow
         self.page.goto("https://www.google.com/search?q=block+breaker")
@@ -134,8 +153,9 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         mute_button_locator.wait_for(state="visible", timeout=15000)
         progress_bar.wait_for(state="hidden", timeout=15000)
 
-        time.sleep(2)
 
+        self.page.wait_for_timeout(2000)  #  This keeps the Playwright loop alive!
+        
         print("Game loaded successfully!")
 
         # Ok this JS code is stuff I learned myself and WHAT A PAIN IN THE AHH
@@ -212,11 +232,22 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         self.game_iframe = game_frame_locator
         self.held_key = None
 
+        self.latest_score = 0
+        self.latest_done = False
+
         print("Grabbed monitor-specific coordinates of game window")
+
+    def _on_game_event(self, source, event):
+        if event["type"] == "score":
+            self.latest_score = event["value"]
+        elif event["type"] == "done":
+            self.latest_done = event["value"]
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.old_score = 0
+        self.latest_score = 0
+        self.latest_done = False
         self.held_key = None
 
         if self.first_start:
@@ -258,18 +289,19 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         t2 = time.perf_counter()
 
         # Query game state
-        done, score = self.get_score_and_done()
+        done, score = self.get_done_and_score()
 
         t3 = time.perf_counter()
 
         # Calculate reward
-        if self.old_score != score:
+        if done:
+            reward = -1
+        elif self.old_score != score:
             reward = (score - self.old_score) / 1000
             self.old_score = score
-        elif not done:
-            reward = 0
         else:
-            reward = -1
+            reward = 0
+
 
         t4 = time.perf_counter()
 
@@ -304,18 +336,8 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         return observation, reward, done, False, {}
 
-    def get_score_and_done(self):
-        # Fetch the real-time variables from memory at lightning speed
-        metrics = self.page.evaluate("""() => {
-            const game = window.top.__stolen_game_state;
-            if (!game) return { score: 0, done: false };
-
-            return {
-                score: game.Ji,    // Perfect reward signal
-                done: game.Cj      // True/False game-over state flag
-            };
-        }""")
-        return metrics["done"], metrics["score"]
+    def get_done_and_score(self):
+        return self.latest_done, self.latest_score
 
     def get_observation(self):
         screenshot = self.cap.grab(
@@ -427,7 +449,7 @@ def main():
                 model.learn(total_timesteps=learning_steps, reset_num_timesteps=False, callback=callback)
 
                 original_env = env.venv.envs[0]
-                done, _ = original_env.get_score_and_done()
+                done, _ = original_env.get_done_and_score()
 
                 if done:
                     obs = env.reset()
@@ -452,7 +474,7 @@ def main():
                 )
 
         else:
-            model_name = "Enter model name here. ex: best_model_80000"
+            model_name = "model_10500"
             model = PPO.load(os.path.join(CHECKPOINT_DIR, model_name))
 
             episode = 0
@@ -466,7 +488,7 @@ def main():
                     action, _ = model.predict(obs)
                     obs, reward, done, info = env.step(action)
                     total_reward += reward
-                
+                                
                 print(f"Total Reward for Episode {episode}: {total_reward}")
 
                 episode += 1
@@ -487,7 +509,7 @@ def main():
 
         #while True:
         #    time.sleep(1)
-        #    print(env.get_score_and_done())
+        #    print(env.get_done_and_score())
         # img = print(env.get_done())
         # img = np.array(img).reshape((img.height, img.width, 4))
         # img_bgr = img[:, :, :3]
