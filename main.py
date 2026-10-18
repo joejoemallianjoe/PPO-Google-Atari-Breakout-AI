@@ -14,7 +14,6 @@ import re
 import os
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3 import PPO
-from stable_baselines3.common.atari_wrappers import MaxAndSkipEnv # for frame skipping
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack # for frame stacking
 
 """
@@ -346,10 +345,14 @@ IMPORTANT!! Disable f.lux when using
 def main():
     with sync_playwright() as p:
         base_env = GoogleAtariBreakout(p)
-        frame_skip = 4
+        frame_stack = 4
 
+        # Because my computer is so slow, the overhead from taking an image and running it through
+        # a CNN policy is slow enough that frame skipping should NOT be implemented
+        # frame stacking however is encouraged
+        
         env = DummyVecEnv([lambda: base_env])
-        env = VecFrameStack(env, n_stack=frame_skip, channels_order="first")
+        env = VecFrameStack(env, n_stack=frame_stack, channels_order="first")
 
         # Saving logic
         CHECKPOINT_DIR = "./train/"
@@ -359,7 +362,7 @@ def main():
         # Training or deployment?
 
         train = True
-        load_previous_model_for_training = False
+        load_previous_model_for_training = True
 
         learning_steps = 512
         total_timesteps = 100000
