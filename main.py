@@ -100,35 +100,47 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # reverse engineer stuff sorry I'm not cracked at CS
 
         def inject_memory_leak(route):
-            if "m=syjv" not in route.request.url:
-                route.continue_()
-                return
+            #if "m=syjv" not in route.request.url:
+            #    route.continue_()
+            #    return
 
             response = route.fetch()
             original_text = response.text()
             injected_text = original_text
 
-            done_signature = "a.Cj=!0"
-            score_signature = ",IXE=function(a,b){"
+            if "SCORE:" not in original_text:
+                route.continue_()
+                return
+
+            score_variable = re.findall(r"SCORE:String\(([a-zA-Z0-9_]+?\.[a-zA-Z0-9_]+?)\)", original_text)[0]
+            score_index = original_text.index("{" + score_variable + "+=")
+            score_signature = original_text[score_index:score_index + len(score_variable) + 5]
+            match = re.search(r"([a-zA-Z0-9_]+?\.[a-zA-Z0-9_]+?)\|\|\(\1=!0", original_text)
+            done_variable = match.group(1)
+
+            if match:
+                done_signature = match.group(0)
+            else:
+                raise LookupError("No matches found for done_signature")
 
             if done_signature not in original_text and score_signature not in original_text:
                 route.continue_()
                 return
+
+            if score_signature in original_text:
+                print("Injected score_signature successfully!")
+
+                injected_text = injected_text.replace(
+                    score_signature,
+                    score_signature + 'window.reportGameEvent({type: "score", value: ' + score_variable + "});"
+                )
 
             if done_signature in injected_text:
                 print("Injected done_signature successfully!")
 
                 injected_text = injected_text.replace(
                     done_signature,
-                    done_signature + ',window.reportGameEvent({type: "done", value: a.Cj})'
-                )
-
-            if score_signature in injected_text:
-                print("Injected score_signature successfully!")
-
-                injected_text = injected_text.replace(
-                    score_signature,
-                    score_signature + 'window.reportGameEvent({type: "score", value: a.Ji + b});'
+                    done_signature + ',window.reportGameEvent({type: "done", value: ' + done_variable + "})"
                 )
 
             route.fulfill(response=response, body=injected_text)
@@ -152,7 +164,6 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
 
         mute_button_locator.wait_for(state="visible", timeout=15000)
         progress_bar.wait_for(state="hidden", timeout=15000)
-
 
         self.page.wait_for_timeout(2000)  #  This keeps the Playwright loop alive!
         
@@ -186,7 +197,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # It's not perfect, but it works. it's like off by +-2 pixels on average, which makes
         # no difference for a CNN.
 
-        mss_region = self.page.evaluate(
+        cap_region = self.page.evaluate(
             """
             // Define an anonymous function
             // We can pass python values into the function by creating parameters
@@ -227,7 +238,7 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
             canvas_viewport_coordinates
         )
 
-        self.game_location = mss_region
+        self.game_location = cap_region
         self.old_score = 0
         self.game_iframe = game_frame_locator
         self.held_key = None
@@ -236,7 +247,27 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         self.latest_done = False
 
         print("Grabbed monitor-specific coordinates of game window")
+        self.test_screen_cap_region(self.game_location)
+        print("Took test screenshots")
 
+    def test_screen_cap_region(self, region):
+        screenshot = self.cap.grab(
+            region=(
+                self.game_location["left"],
+                self.game_location["top"],
+                self.game_location["left"] + self.game_location["width"],
+                self.game_location["top"] + self.game_location["height"]
+            ),
+            new_frame_only=False,
+            copy=False
+        )
+
+        color_data = cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR)
+        grayscale_data = cv2.cvtColor(screenshot, cv2.COLOR_RGB2GRAY)
+
+        cv2.imwrite("color-image-test.png", color_data)
+        cv2.imwrite("grayscale-image-test.png", grayscale_data)
+    
     def _on_game_event(self, source, event):
         if event["type"] == "score":
             self.latest_score = event["value"]
@@ -291,6 +322,8 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         # Query game state
         done, score = self.get_done_and_score()
 
+        print(f"Done: {done}, score: {score}")
+
         t3 = time.perf_counter()
 
         # Calculate reward
@@ -322,14 +355,14 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
         if self._step_timing_count >= 100:
             avg = self._step_timing_totals / self._step_timing_count
 
-            print(
+            """print(
                 f"Keyboard: {avg[0]*1000:.1f} ms | "
                 f"Observation: {avg[1]*1000:.1f} ms | "
                 f"JS query: {avg[2]*1000:.1f} ms | "
                 f"Reward: {avg[3]*1000:.2f} ms | "
                 f"Total step: {avg[4]*1000:.1f} ms | "
                 f"Env FPS: {1/avg[4]:.1f}"
-            )
+            )"""
 
             self._step_timing_count = 0
             self._step_timing_totals[:] = 0
@@ -347,10 +380,11 @@ class GoogleAtariBreakout(Env): # This signifies it inherits from gym.Env
                 self.game_location["left"] + self.game_location["width"],
                 self.game_location["top"] + self.game_location["height"]
             ),
-            new_frame_only=False
+            new_frame_only=False,
+            copy=False # for performance
         )
 
-        grayscale_data = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+        grayscale_data = cv2.cvtColor(screenshot, cv2.COLOR_RGB2GRAY)
 
         target_size = (self.IMAGE_WIDTH, self.IMAGE_HEIGHT)
         resized_img = cv2.resize(
@@ -421,14 +455,18 @@ def main():
         train = True
         load_previous_model_for_training = False
 
-        learning_steps = 512
+        learning_steps = 2048
         total_timesteps = 100000
         num_training_cycles = int(total_timesteps / learning_steps)
 
+        # look into way to get screen capture while not in active window
+
         if train:
             if load_previous_model_for_training:
-                model_name = "model_3300"
-                model = PPO.load(os.path.join(CHECKPOINT_DIR, model_name),
+                model_name = "model_73500.zip"
+                path = os.path.join(CHECKPOINT_DIR, model_name)
+                print(path)
+                model = PPO.load(path,
                                 env=env)
                 learning_steps = model.n_steps
             else:
